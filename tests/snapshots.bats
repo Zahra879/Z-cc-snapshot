@@ -5,4 +5,5 @@
   [ "$status" -eq 0 ]
   [[ "$output" == *"usage:"* ]]
 }
+#bats cc-snapshot.bats
 
