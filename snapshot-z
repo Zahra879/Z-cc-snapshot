@@ -1,0 +1,486 @@
+#!/bin/bash
+
+if [[ $EUID -ne 0 ]]; then
+   echo "This script must be run as root"
+   exit 1
+fi
+
+# ===============================================================================
+## Properties
+# ===============================================================================
+## OpenStack Properties
+# ===============================================================================
+OPENSTACK_VENDOR_DATA='http://169.254.169.254/openstack/latest/vendor_data.json'
+OPENSTACK_VENDOR_DATA_2='http://169.254.169.254/openstack/latest/vendor_data2.json'
+# ===============================================================================
+## Chameleon Properties
+# ===============================================================================
+PROVENANCE_FILE='/opt/chameleon/provenance.json'
+# ===============================================================================
+## CC-Snapshot Properties
+# ===============================================================================
+# Snapshot disk format
+CC_SNAPSHOT_DISK_FORMAT=qcow2
+# Generated snapshot locations
+#CC_SNAPSHOT_TAR_PATH=/tmp/snapshot.tar
+CC_SNAPSHOT_CONVERTED_PATH=/tmp/snapshot.img
+CC_SNAPSHOT_CONVERTED_COMPRESSED_PATH=/tmp/snapshot_compressed.qcow2
+# Max snapshot tarball size (MB) for save upload
+#CC_SNAPSHOT_MAX_TARBALL_SIZE=8000
+# ===============================================================================
+
+IGNORE_WARNING=false
+FORCE_YES=false
+
+print_usage() {
+  echo "usage: $0 [-p] [-e folder_to_exclude] snapshot_name"
+  echo "Optional arguments:"
+  echo ""
+  echo "  -h        Print this help message"
+  echo "  -e        Exclude folder while snapshotting (can be used multiple times to exclude multiple folders)"
+  echo "  -f        Ignore all warnings"
+  echo "  -y        Answer 'yes' to all prompts"
+  echo ""
+  echo " cc-snapshot version 0.2.0"
+}
+
+check_size(){
+echo "Dummy simulating check_size..."
+echo "DEBUG TAR PATH: '$CC_SNAPSHOT_TAR_PATH'"
+ls -lh "$CC_SNAPSHOT_TAR_PATH"
+
+SNAPSHOT_TAR_SIZE=$(($(stat -c %s $CC_SNAPSHOT_TAR_PATH) / 1024 / 1024 ))
+LARGE_TAR_CONTINUE='yes'
+echo "testing checksize 1"
+if [ $SNAPSHOT_TAR_SIZE -gt $CC_SNAPSHOT_MAX_TARBALL_SIZE ] && [ "$IGNORE_WARNING" == false ]; then
+  echo "WARNING: snapshot is too large ($SNAPSHOT_TAR_SIZE)! May cause issues."
+  echo 'Do you want to continue? (yes/no)'
+  read -r LARGE_TAR_CONTINUE_INPUT
+  export LARGE_TAR_CONTINUE=$LARGE_TAR_CONTINUE_INPUT
+fi
+
+if [ ${LARGE_TAR_CONTINUE,,} != 'yes' ]; then
+  echo 'Aborting...'
+  exit 0
+fi
+}
+
+USE_DUMMY=false
+
+# Filter --dummy manually and rebuild args
+NEW_ARGS=()
+for arg in "$@"; do
+  if [[ "$arg" == "--dummy" ]]; then
+    USE_DUMMY=true
+  else
+    NEW_ARGS+=("$arg")
+  fi
+done
+
+# Reassign filtered args to $@
+set -- "${NEW_ARGS[@]}"
+
+while getopts "hpe:fy" opt; do
+  case $opt in
+    h)
+      print_usage
+      exit 0
+      ;;
+    e)
+      EXCLUDE_FOLDERS+=("$OPTARG")
+      ;;
+    f)
+      IGNORE_WARNING=true
+      ;;
+    y)
+      FORCE_YES=true
+      ;;
+    \?)
+      echo "Invalid option: -$OPTARG" >&2
+      print_usage
+      exit 1
+      ;;
+  esac
+done
+
+shift $((OPTIND - 1)) 
+
+#####Testing functions using summy stage 
+
+if [[ -n "${DUMMY_STAGE:-}" ]]; then
+  echo "[DUMMY] Running dummy stage: $DUMMY_STAGE"
+  case "$DUMMY_STAGE" in
+    check_size)
+	echo " debug the chech size function"
+      check_size
+      echo "After debug the chech size function"
+      exit 0
+      ;;
+    create_disk_image)
+      create_disk_image
+      exit 0
+      ;;
+    *)
+      echo "[DUMMY] Unknown stage: $DUMMY_STAGE"
+      exit 1
+      ;;
+  esac
+fi
+
+###### Update section ######
+
+#Download latest version, assign versions to variables, curlstat variable ensures update only executes if curl succeeds.
+#------------------------------------------------
+SCRIPT=$0
+#curl -s -o /tmp/tmp-snap https://raw.githubusercontent.com/ChameleonCloud/cc-snapshot/master/cc-snapshot
+#CURLSTAT=$?
+NEWSCRIPT='/tmp/tmp-snap'
+
+#Compare files and update if cc-snapshot outdated
+#------------------------------------------------
+#diff -q "$SCRIPT" "$NEWSCRIPT" &>/dev/null
+#DIFF=$?
+#if [ $DIFF -eq 1 ] && [ $CURLSTAT -eq 0 ]; then
+#  echo 'Your cc-snapshot is not up to date.'
+#  if [ $IGNORE_WARNING == false ]; then
+#  	if [ $FORCE_YES == false ]; then
+#      read -ep 'Update now? [y/n]'
+#    else
+#      REPLY=y
+#    fi
+
+#  	if [[ $REPLY =~ ^[Yy]$ ]]; then
+#    	mv --backup=t "$SCRIPT" "$SCRIPT'-old'"
+#    	mv "$NEWSCRIPT" "$SCRIPT"
+#    	chmod +x "$SCRIPT"
+#  	  exec "$SCRIPT" "$@"
+#    fi
+#  fi
+#fi
+
+###### Update section end ######
+
+###### Check openstackclient version ######
+## each separate version number must be less than 3 digit wide !
+function version { echo "$@" | gawk -F. '{ printf("%03d%03d%03d\n", $1,$2,$3); }'; }
+
+openstackclient_version=$(echo $(openstack --version 2>/dev/null) | awk -F" " '{ print $2}')
+if [ "$(version "$openstackclient_version")" -lt "$(version "3.16.0")" ]; then
+  echo "The openstack client version is too old; please run 'sudo pip install python-openstackclient --upgrade' to update"
+  echo "If you are using python 2, please also run 'sudo pip install --upgrade \"more-itertools<6.0.0\"', since more-itertools (used by openstack client) dropped support of python 2 after version 6.0.0."
+  exit 1
+fi
+###### Check openstackclient version end ######
+
+###### Get provenance properties ######
+PROVENANCE_PROPERTIES=''
+if [ -f "$PROVENANCE_FILE" ]; then
+  for prop in $(cat $PROVENANCE_FILE | tr -d '\n' | tr -d [:space:] | tr -d '{' | tr -d '}' | tr ',' '\n');
+  do
+    prop="${prop/\":\"/=}"
+    prop="$(echo $prop | tr -d '"')"
+    [[ $prop == chameleon-supported* ]] && continue
+    PROVENANCE_PROPERTIES="--property provenance-$prop $PROVENANCE_PROPERTIES"
+  done
+fi
+###### Get provenance properties end ######
+
+set -eu
+set -o pipefail
+
+shift $((OPTIND-1))
+
+HOSTNAME=$(hostname)
+UUID=$(uuidgen)
+
+if [ $# -eq 0 ]; then
+  SNAPSHOT_NAME="${HOSTNAME}_${UUID}"
+else
+  SNAPSHOT_NAME="$1"
+fi
+
+echo "Will snapshot the instance using the following name: '$SNAPSHOT_NAME'"
+if [ -n "${EXCLUDE_FOLDERS+x}" ]; then
+  for folder in "${EXCLUDE_FOLDERS[@]}"; do
+    echo "Will exclude folder: $folder"
+  done
+fi
+
+# Tar can read a file that contains a list of newline-separated file patterns
+# for exclusion. Empty lines are OK. Commented lines technically are interpreted
+# as a file, but they shouldn't match anything.
+EXCLUDE_FROM="$(mktemp)"
+cat >$EXCLUDE_FROM <<EOF
+# Temp
+/tmp/*
+/var/tmp/*
+# Instance-specific
+/proc/*
+/boot/extlinux
+/var/lib/cloud
+# Sockets
+/var/lib/gssproxy/*.sock
+/var/spool/postfix
+# Swift cloudfuse mount
+/home/cc/my_mounting_point
+# Ubuntu lxcfs
+/var/lib/lxcfs
+# User excludes
+$(printf "%s\n" "${EXCLUDE_FOLDERS[@]:-}")
+EOF
+
+DISTRO=$(gawk -F= '/^NAME/{print $2}' /etc/os-release | tr -d \"\' | tr ' ' '-')
+UBUNTU='Ubuntu'
+CENTOS='CentOS-Linux'
+CENTOS_STREAM='CentOS-Stream'
+
+UBUNTU_VERSION=''
+if [ $DISTRO = $UBUNTU ]; then
+  UBUNTU_VERSION=$(lsb_release -c | awk '{print $2}')
+fi
+
+CENTOS_VERSION=''
+if [ $DISTRO = $CENTOS ]; then
+	CENTOS_VERSION=$(gawk -F= '/^VERSION_ID/{print $2}' /etc/os-release | tr -d \"\' | tr ' ' '-')
+fi
+
+CENTOS_STREAM_VERSION=''
+if [ $DISTRO = $CENTOS_STREAM ]; then
+    CENTOS_STREAM_VERSION=$(gawk -F= '/^VERSION_ID/{print $2}' /etc/os-release | tr -d \"\' | tr ' ' '-')
+fi
+
+# Configure env for glance to upload image
+# try vendordata2.json first and fallback to vendordata.json if empty
+JSON_VENDOR_DATA=$(curl -s $OPENSTACK_VENDOR_DATA_2)
+NEW_VENDOR_DATA=true
+if [ "$JSON_VENDOR_DATA" = '{}' ]; then
+  JSON_VENDOR_DATA=$(curl -s $OPENSTACK_VENDOR_DATA)
+  NEW_VENDOR_DATA=false
+fi
+
+if hash jq 2>/dev/null; then
+  if $NEW_VENDOR_DATA; then
+    JSON_VENDOR_DATA=$(echo $JSON_VENDOR_DATA | jq -r .chameleon)
+  fi
+  SITE=$(echo $JSON_VENDOR_DATA | jq -r .site)
+  REGION=$(echo $JSON_VENDOR_DATA | jq -r .region)
+  PROJECT_ID=$(echo $JSON_VENDOR_DATA | jq -r .project_id)
+  TOKEN=$(echo $JSON_VENDOR_DATA | jq -r .service_token)
+  OS_AUTH_URL=$(echo $JSON_VENDOR_DATA | jq -r .auth_url_v3)
+else
+  # jq not available
+  function extract_json_key {
+    RESULT=$(echo "$2" | sed "s/.*$1\": \"//g" | sed 's/".*//g')
+    echo "$RESULT"
+  }
+  SITE=$(extract_json_key "site" "$JSON_VENDOR_DATA")
+  REGION=$(extract_json_key "region" "$JSON_VENDOR_DATA")
+  PROJECT_ID=$(extract_json_key "project_id" "$JSON_VENDOR_DATA")
+  TOKEN=$(extract_json_key "service_token" "$JSON_VENDOR_DATA")
+  OS_AUTH_URL=$(extract_json_key "auth_url_v3" "$JSON_VENDOR_DATA")
+fi
+
+if dmesg | grep -q Hypervisor; then
+  # The current instance is apparently not a baremetal node.
+  >&2 echo "Error: cc-snapshot is only supported for baremetal instances."
+  exit 1
+fi
+
+export OS_REGION_NAME=$REGION
+if [ -z "$OS_REGION_NAME" ]; then unset OS_REGION_NAME; fi
+
+export OS_AUTH_URL=$OS_AUTH_URL
+export OS_IDENTITY_API_VERSION=3
+export OS_PROJECT_ID=$PROJECT_ID
+export OS_TOKEN=$TOKEN
+export OS_AUTH_TYPE="token"
+
+set +e
+openstack image list >/dev/null #2>&1
+if [ ! $? -eq 0 ]; then
+  echo Unable to contact Glance, check username and password
+  exit 1
+fi
+set -e
+
+#################################
+# Begin the snapshotting process
+#################################
+install_preequisites(){
+
+if [ $DISTRO = $CENTOS ] && [ $CENTOS_VERSION -eq 7 ]; then
+  # Install prerequisite software (only required for XFS file systems, which is the default on CentOS 7):
+  yum install -y libguestfs-xfs
+  yum update -y lvm2 # must be at least 2.02-171 to avoid bug https://bugzilla.redhat.com/show_bug.cgi?id=1475018
+fi
+
+
+if [ $DISTRO = $UBUNTU ]; then
+  # Ensure /boot/efi directory exists and install grub-efi if it doesn't
+  if [ ! -d /boot/efi ]; then
+    echo "Creating /boot/efi directory..."
+    sudo mkdir -p /boot/efi
+    echo "Installing grub-efi..."
+    apt-get install -yq grub-efi
+  fi
+fi
+ }
+
+prepare_tarball(){
+# Create a tar file of the contents of your instance:
+declare -a TAR_ARGS=(--selinux --acls --numeric-owner --one-file-system --exclude-from $EXCLUDE_FROM)
+if [ $DISTRO = $CENTOS ]; then
+  TAR_ARGS+=(--xattrs)
+fi
+
+# The following code is inspired from http://unix.stackexchange.com/questions/82598
+n=0
+until [ $n -ge 5 ]
+do
+  tar --create --file $CC_SNAPSHOT_TAR_PATH ${TAR_ARGS[@]} / && break
+  n=$[$n+1]
+  sleep 15
+done
+}
+
+# Get the size of tar and warn user if exceeds threshold property
+echo "before check_size"
+
+creat_disk_image(){
+	
+if [ $DISTRO = $UBUNTU ]; then
+  if [ $UBUNTU_VERSION != "trusty" ]; then
+    apt-get install -yq libguestfs-tools
+  fi
+
+  # Update guestfs appliances (prevent an error with virt-make-fs);
+  # BUG: one package cannot be found (kpartx) and cause update-guestfs-appliance
+  #      to exit with an error code;
+  apt-get -yq update # APT repos may need an update in order to find kpartx
+  apt-get install -yq kpartx
+  if [ "$(which update-guestfs-appliance)" != "" ]; then
+    update-guestfs-appliance || true
+  fi
+fi
+
+FS="ext4"
+
+[[ -n ${LABEL:-} ]] || {
+  LABEL="$(sudo e2label $(findmnt -t ext4 -J | jq -r ".filesystems[].source" ))"
+  if [ ! -L "/dev/disk/by-label/$LABEL" ]; then
+    LABEL="$(ls -1 /dev/disk/by-label)"
+    if [[ "$(wc -l <<<"$LABEL")" != "1" ]]; then
+      >&2 echo "Unable to auto-detect disk label: found >1 labeled disks:"
+      >&2 echo "$(sed 's/\n/ - /g' <<<"$LABEL")"
+      >&2 echo "Please try again while explicitly setting the LABEL"
+      >&2 echo "env variable to the desired disk label."
+      exit 1
+    fi
+  fi
+}
+
+# Next ensure that the GRUB bootloader is present in the image:
+EXTRA_CMD=""
+
+GRUBNAME=$(type -p grub-install) || echo "trying grub2-install"
+if [ -z "$GRUBNAME" ]; then
+    GRUBNAME=$(type -p grub2-install)
+fi
+
+if [ $DISTRO = $CENTOS ] || [ $DISTRO = $CENTOS_STREAM ]; then
+    EFI_BOOT_DIR="/boot/efi/EFI/centos"
+elif [ $DISTRO = $UBUNTU ]; then
+    EFI_BOOT_DIR="/boot/efi/EFI/ubuntu"
+fi
+
+if type grub2-mkconfig > /dev/null 2>&1; then
+    GRUB_MKCONFIG="grub2-mkconfig"
+else
+    GRUB_MKCONFIG="grub-mkconfig"
+fi
+
+if [ -d /boot/grub2 ]; then
+    GRUB_CFG=/boot/grub2/grub.cfg
+    GRUB_ENV=/boot/grub2/grubenv
+    EXTRA_CMD="&& mkdir -p $EFI_BOOT_DIR && cp $GRUB_CFG $EFI_BOOT_DIR/grub.cfg && cp $GRUB_ENV $EFI_BOOT_DIR/grubenv"
+else
+    GRUB_CFG=/boot/grub/grub.cfg
+fi
+
+ARCH=$(uname -i)
+case "$ARCH" in
+    "x86_64") GRUB_INSTALL_TARGET="x86_64-efi"
+    ;;
+    "aarch64"|"arm64") GRUB_INSTALL_TARGET="arm64-efi"
+    ;;
+    *)
+        echo "$ARCH unsupported!"
+        exit 1
+    ;;
+esac
+
+extra_options=""
+if [ ! -d $EFI_BOOT_DIR ]; then
+    # This tells the EFI install to put the EFI binaries into
+    # the generic /BOOT directory and avoids trying to update
+    # nvram settings.
+    extra_options="--efi-directory=/boot/efi --target=$GRUB_INSTALL_TARGET --removable && $GRUBNAME /dev/sda"
+else
+    extra_options="/dev/sda"
+fi
+
+filesystem_size=$(du -d 0 -m --exclude-from=$EXCLUDE_FROM / |  awk -F" "  '{ print $1 }')
+total_disk_size=$(($filesystem_size + 1500))
+
+# 550M for UEFI partition and 8M for BIOS partition
+guestfish -N $CC_SNAPSHOT_CONVERTED_PATH=disk:"$total_disk_size"M -- \
+part-init /dev/sda gpt : \
+part-add /dev/sda primary 2048 1128447 : \
+part-add /dev/sda primary 1128448 1144831 : \
+part-add /dev/sda primary 1144832 -40 : \
+mkfs $FS /dev/sda3 label:$LABEL : \
+mkfs vfat /dev/sda1 label:MKFS_ESP : \
+mount /dev/sda3 / : tar-in $CC_SNAPSHOT_TAR_PATH / : mount /dev/sda1 /boot/efi : \
+sh "parted /dev/sda set 2 bios_grub on" : \
+sh "parted /dev/sda set 1 esp on || true" : \
+sh "$GRUBNAME $extra_options && $GRUB_MKCONFIG -o $GRUB_CFG $EXTRA_CMD"
+
+
+# To remove unwanted configuration information from your image, run:
+virt-sysprep -a $CC_SNAPSHOT_CONVERTED_PATH
+
+# To complete the preparation of your snapshot image, create a compressed version of it:
+qemu-img convert $CC_SNAPSHOT_CONVERTED_PATH -O $CC_SNAPSHOT_DISK_FORMAT $CC_SNAPSHOT_CONVERTED_COMPRESSED_PATH -c
+} 
+################################
+# Upload the Snapshot on Glance
+################################
+
+# The final steps are to upload your snapshot image to OpenStack Glance.
+upload_to_glance(){
+    openstack image create \
+    --disk-format $CC_SNAPSHOT_DISK_FORMAT \
+	--container-format bare \
+	$PROVENANCE_PROPERTIES \
+	$SNAPSHOT_NAME <$CC_SNAPSHOT_CONVERTED_COMPRESSED_PATH
+}
+
+do_dummy_snapshot() {
+  echo "[DUMMY] Snapshot name: $SNAPSHOT_NAME"
+  echo "[DUMMY] Excluded folders:"
+  printf '%s\n' "${EXCLUDE_FOLDERS[@]:-<none>}"
+  echo "[DUMMY] Skipping real snapshot. Dummy mode enabled."
+}
+
+do_real_snapshot() {
+  echo "[ERROR] do_real_snapshot not yet implemented or dummy mode required"
+  exit 1
+}
+
+#if $USE_DUMMY; then
+#  do_dummy_snapshot
+#else
+#  do_real_snapshot
+#fi
+echo "exiting script"
+exit 0
