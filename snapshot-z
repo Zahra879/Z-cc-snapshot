@@ -1,6 +1,6 @@
 #!/bin/bash
 
-if [[ $EUID -ne 0 ]]; then
+if [[ $EUID -ne 0 && -z ${TESTING_SKIP_ROOT_CHECK} ]]; then
    echo "This script must be run as root"
    exit 1
 fi
@@ -31,6 +31,7 @@ CC_SNAPSHOT_CONVERTED_COMPRESSED_PATH=/tmp/snapshot_compressed.qcow2
 
 IGNORE_WARNING=false
 FORCE_YES=false
+DRY_RUN=false
 
 print_usage() {
   echo "usage: $0 [-p] [-e folder_to_exclude] snapshot_name"
@@ -40,8 +41,16 @@ print_usage() {
   echo "  -e        Exclude folder while snapshotting (can be used multiple times to exclude multiple folders)"
   echo "  -f        Ignore all warnings"
   echo "  -y        Answer 'yes' to all prompts"
+  echo "  -d        Dry run the snapshot script"
   echo ""
   echo " cc-snapshot version 0.2.0"
+}
+run_cmd() {
+  if [[ "$DRY_RUN" == true ]]; then
+    echo "[DRY_RUN] $*"
+  else
+    "$@"
+  fi
 }
 
 check_size(){
@@ -65,20 +74,8 @@ if [ ${LARGE_TAR_CONTINUE,,} != 'yes' ]; then
 fi
 }
 
-USE_DUMMY=false
-
-# Filter --dummy manually and rebuild args
-NEW_ARGS=()
-for arg in "$@"; do
-  if [[ "$arg" == "--dummy" ]]; then
-    USE_DUMMY=true
-  else
-    NEW_ARGS+=("$arg")
-  fi
-done
-
 # Reassign filtered args to $@
-set -- "${NEW_ARGS[@]}"
+#set -- "${NEW_ARGS[@]}"
 
 while getopts "hpe:fy" opt; do
   case $opt in
@@ -94,6 +91,9 @@ while getopts "hpe:fy" opt; do
       ;;
     y)
       FORCE_YES=true
+      ;;
+    d)
+      DRY_RUN=true
       ;;
     \?)
       echo "Invalid option: -$OPTARG" >&2
@@ -337,7 +337,7 @@ fi
 n=0
 until [ $n -ge 5 ]
 do
-  tar --create --file $CC_SNAPSHOT_TAR_PATH ${TAR_ARGS[@]} / && break
+  run_cmd tar --create --file $CC_SNAPSHOT_TAR_PATH ${TAR_ARGS[@]} / && break
   n=$[$n+1]
   sleep 15
 done
@@ -450,7 +450,7 @@ sh "$GRUBNAME $extra_options && $GRUB_MKCONFIG -o $GRUB_CFG $EXTRA_CMD"
 virt-sysprep -a $CC_SNAPSHOT_CONVERTED_PATH
 
 # To complete the preparation of your snapshot image, create a compressed version of it:
-qemu-img convert $CC_SNAPSHOT_CONVERTED_PATH -O $CC_SNAPSHOT_DISK_FORMAT $CC_SNAPSHOT_CONVERTED_COMPRESSED_PATH -c
+run_cmd qemu-img convert $CC_SNAPSHOT_CONVERTED_PATH -O $CC_SNAPSHOT_DISK_FORMAT $CC_SNAPSHOT_CONVERTED_COMPRESSED_PATH -c
 } 
 ################################
 # Upload the Snapshot on Glance
@@ -464,23 +464,5 @@ upload_to_glance(){
 	$PROVENANCE_PROPERTIES \
 	$SNAPSHOT_NAME <$CC_SNAPSHOT_CONVERTED_COMPRESSED_PATH
 }
-
-do_dummy_snapshot() {
-  echo "[DUMMY] Snapshot name: $SNAPSHOT_NAME"
-  echo "[DUMMY] Excluded folders:"
-  printf '%s\n' "${EXCLUDE_FOLDERS[@]:-<none>}"
-  echo "[DUMMY] Skipping real snapshot. Dummy mode enabled."
-}
-
-do_real_snapshot() {
-  echo "[ERROR] do_real_snapshot not yet implemented or dummy mode required"
-  exit 1
-}
-
-#if $USE_DUMMY; then
-#  do_dummy_snapshot
-#else
-#  do_real_snapshot
-#fi
-echo "exiting script"
+echo "exiting z-snapshot script"
 exit 0

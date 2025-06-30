@@ -12,8 +12,11 @@ fail() {
 pass() {
   echo "PASS: $1"
 }
+
+CC_SNAPSHOT=./snapshot-z
+
 # Test 1: Help option (-h)
-output=$(sudo ./snapshot-z --dummy -h 2>&1) || true
+output=$(TESTING_SKIP_ROOT_CHECK=1 "$CC_SNAPSHOT" -h 2>&1) || true
 if [[ "$output" == *"usage:"* ]]; then
   pass "Help option (-h) shows usage"
 else
@@ -21,21 +24,22 @@ else
 fi
 
 # Test 2: -e without folder
-output=$(sudo ./snapshot-z -e 2>&1) && status=0 || status=$?
+output=$(TESTING_SKIP_ROOT_CHECK=1 "$CC_SNAPSHOT" -e 2>&1) && status=0 || status=$?
 if [[ $status -ne 0 && "$output" == *"usage:"* ]]; then
   pass "-e without folder fails with error"
 else
   fail "-e without folder did not fail as expected"
 fi
 
-#test 5: running with an invalid flag (-z)
-output=$(sudo ./snapshot-z -z 2>&1) && status=0 || status=$?
+#test 3: running with an invalid flag (-z)
+output=$(TESTING_SKIP_ROOT_CHECK=1 "$CC_SNAPSHOT" -z 2>&1) && status=0 || status=$?
 if [[ $status -ne 0 && "$output" == *"usage:"* ]]; then
   pass "Invalid flag (-z) is handled with error"
 else
   fail "Invalid flag (-z) did not trigger error as expected"
 fi
 
+echo "All applicable interface tests passed."
 # Test 3: -f suppresses warnings
 #output=$(sudo ./snapshot-z -f test-snapshot 2>&1) && status=0 || status=$?
 #if echo "$output" | grep -qi "warning"; then
@@ -51,15 +55,7 @@ fi
 #else
 #  pass "With -y, script skipped confirmation as expected"
 #fi
-
-echo "All applicable interface tests passed."
-
 ### Testing check_size and prepare_tarball
-
-#export CC_SNAPSHOT_TAR_PATH=/tmp/fake.tar
-#export CC_SNAPSHOT_MAX_TARBALL_SIZE=5
-#export IGNORE_WARNING=false
-#export FORCE_YES=true
 
 dd if=/dev/zero of=/tmp/fake.tar bs=1M count=10 status=none
 
@@ -82,3 +78,13 @@ echo "working4"
 #clean
 rm -f /tmp/fake.tar
 echo "working 5"
+
+#Test : Dry-run does not error and prints each step 
+output=$(TESTING_SKIP_ROOT_CHECK=1 "$CC_SNAPSHOT" -d mytest 2>&1) || status=$?
+if [[ $status -eq 0 && "output" == *"[DRY-RUN]"* ]]; then
+  pass "Dry-run flag prints steps without error"
+else
+  fail "Dry-run did not behave as expected"
+fi 
+
+echo " end of dry run test"
