@@ -22,7 +22,7 @@ PROVENANCE_FILE='/opt/chameleon/provenance.json'
 # Snapshot disk format
 CC_SNAPSHOT_DISK_FORMAT=qcow2
 # Generated snapshot locations
-#CC_SNAPSHOT_TAR_PATH=/tmp/snapshot.tar
+CC_SNAPSHOT_TAR_PATH=/tmp/snapshot.tar
 CC_SNAPSHOT_CONVERTED_PATH=/tmp/snapshot.img
 CC_SNAPSHOT_CONVERTED_COMPRESSED_PATH=/tmp/snapshot_compressed.qcow2
 # Max snapshot tarball size (MB) for save upload
@@ -32,25 +32,19 @@ CC_SNAPSHOT_CONVERTED_COMPRESSED_PATH=/tmp/snapshot_compressed.qcow2
 IGNORE_WARNING=false
 FORCE_YES=false
 DRY_RUN=false
+FORCE_YES=false
 
 print_usage() {
-  echo "usage: $0 [-p] [-e folder_to_exclude] snapshot_name"
+  echo "usage: $0 [-p] [-e folder_to_exclude] [-d] snapshot_name"
   echo "Optional arguments:"
   echo ""
   echo "  -h        Print this help message"
   echo "  -e        Exclude folder while snapshotting (can be used multiple times to exclude multiple folders)"
   echo "  -f        Ignore all warnings"
   echo "  -y        Answer 'yes' to all prompts"
-  echo "  -d        Dry run the snapshot script"
+  echo "  -d        Dry run prints each step instead of running snapshot script"
   echo ""
   echo " cc-snapshot version 0.2.0"
-}
-run_cmd() {
-  if [[ "$DRY_RUN" == true ]]; then
-    echo "[DRY_RUN] $*"
-  else
-    "$@"
-  fi
 }
 
 check_size(){
@@ -75,9 +69,9 @@ fi
 }
 
 # Reassign filtered args to $@
-#set -- "${NEW_ARGS[@]}"
+#set -- "${NEW_ARGS[@]:-}"
 
-while getopts "hpe:fy" opt; do
+while getopts "hpe:fyd" opt; do
   case $opt in
     h)
       print_usage
@@ -126,6 +120,14 @@ if [[ -n "${DUMMY_STAGE:-}" ]]; then
       ;;
   esac
 fi
+
+run_cmd() {
+  if [[ "$DRY_RUN" == true ]]; then
+    echo "[DRY_RUN] $*"
+  else
+    "$@"
+  fi
+} 
 
 ###### Update section ######
 
@@ -458,11 +460,19 @@ run_cmd qemu-img convert $CC_SNAPSHOT_CONVERTED_PATH -O $CC_SNAPSHOT_DISK_FORMAT
 
 # The final steps are to upload your snapshot image to OpenStack Glance.
 upload_to_glance(){
-    openstack image create \
+   run_cmd openstack image create \
     --disk-format $CC_SNAPSHOT_DISK_FORMAT \
 	--container-format bare \
 	$PROVENANCE_PROPERTIES \
 	$SNAPSHOT_NAME <$CC_SNAPSHOT_CONVERTED_COMPRESSED_PATH
 }
+
+# now actually run the stages under run_cmd:
+install_preequisites
+prepare_tarball
+check_size
+create_disk_image
+upload_to_glance
+
 echo "exiting z-snapshot script"
 exit 0
