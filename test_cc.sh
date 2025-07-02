@@ -61,6 +61,20 @@ echo "All applicable interface tests passed."
 #else
 #  pass "With -y, script skipped confirmation as expected"
 #fi
+
+#Test : Dry-run does not error and prints each step
+if output=$(TESTING_SKIP_ROOT_CHECK=1 "$CC_SNAPSHOT" -d mytest 2>&1); then
+  if [[ "$output" == *"[DRY_RUN]"* ]]; then
+    pass "Dry-run flag prints steps without error"
+  else
+    fail "Dry-run did not behave as expected"
+  fi
+else
+  fail "Dry-run exited with error: $output"
+fi
+
+echo " end of dry run test"
+
 ### Testing check_size and prepare_tarball
 
 dd if=/dev/zero of=/tmp/fake.tar bs=1M count=10 status=none
@@ -82,12 +96,3 @@ fi
 #clean
 rm -f /tmp/fake.tar
 
-#Test : Dry-run does not error and prints each step 
-output=$(TESTING_SKIP_ROOT_CHECK=1 "$CC_SNAPSHOT" -d mytest 2>&1) || status=$?
-if [[ $status -eq 0 && "output" == *"[DRY-RUN]"* ]]; then
-  pass "Dry-run flag prints steps without error"
-else
-  fail "Dry-run did not behave as expected"
-fi 
-
-echo " end of dry run test"
