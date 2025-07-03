@@ -22,11 +22,13 @@ PROVENANCE_FILE='/opt/chameleon/provenance.json'
 # Snapshot disk format
 CC_SNAPSHOT_DISK_FORMAT=qcow2
 # Generated snapshot locations
-CC_SNAPSHOT_TAR_PATH=/tmp/snapshot.tar
+#CC_SNAPSHOT_TAR_PATH=/tmp/snapshot.tar
 CC_SNAPSHOT_CONVERTED_PATH=/tmp/snapshot.img
 CC_SNAPSHOT_CONVERTED_COMPRESSED_PATH=/tmp/snapshot_compressed.qcow2
 # Max snapshot tarball size (MB) for save upload
-CC_SNAPSHOT_MAX_TARBALL_SIZE=8000
+#CC_SNAPSHOT_MAX_TARBALL_SIZE=8000
+CC_SNAPSHOT_TAR_PATH="${CC_SNAPSHOT_TAR_PATH:-/tmp/snapshot.tar}"
+CC_SNAPSHOT_MAX_TARBALL_SIZE="${CC_SNAPSHOT_MAX_TARBALL_SIZE:-8000}"
 # ===============================================================================
 
 IGNORE_WARNING=false
@@ -139,7 +141,7 @@ run_cmd() {
 
 #Download latest version, assign versions to variables, curlstat variable ensures update only executes if curl succeeds.
 #------------------------------------------------
-if [[ "$SKIP_UPDATE" == false ]]; then
+if [[ "$SKIP_UPDATE" == false && "$DRY_RUN" == false ]]; then
   echo ">> Running self-update check"
   SCRIPT=$0
   curl -s -o /tmp/tmp-snap https://raw.githubusercontent.com/ChameleonCloud/cc-snapshot/master/cc-snapshot
@@ -290,10 +292,10 @@ else
   OS_AUTH_URL=$(extract_json_key "auth_url_v3" "$JSON_VENDOR_DATA")
 fi
 
-if dmesg | grep -q Hypervisor; then
+if run_cmd "dmesg | grep -q Hypervisor"; then
   # The current instance is apparently not a baremetal node.
-  >&2 echo "Error: cc-snapshot is only supported for baremetal instances."
-  exit 1
+  >&2 run_cmd echo "Error: cc-snapshot is only supported for baremetal instances."
+  run_cmd exit 1
 fi
 
 export OS_REGION_NAME=$REGION
