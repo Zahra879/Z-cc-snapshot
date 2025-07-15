@@ -83,7 +83,12 @@ while getopts "hpe:fydus:" opt; do
   case $opt in
 
     s)
-      SOURCE_DIR="$OPTARG"
+      #resolve and validate the path:
+      SOURCE_DIR=$(realpath -e "$OPTARG") || {
+        echo "ERROR: Specified source directory '$OPTARG' does not exist or isn’t accessible." >&2
+        exit 1
+      }
+      SOURCE_DIR=${SOURCE_DIR%/}
       ;;
     h)
       print_usage
@@ -115,16 +120,6 @@ done
 shift $((OPTIND - 1)) 
 SNAPSHOT_NAME="${1:-$(hostname)_$(uuidgen)}"
 SOURCE_DIR="${SOURCE_DIR:-/}"
-
-if [[ ! -d "$SOURCE_DIR" ]]; then
-  echo "ERROR: Specified source directory '$SOURCE_DIR' does not exist."
-  exit 1
-fi
-
-if [[ "$SOURCE_DIR" != /* ]]; then
-  echo "ERROR: Source directory must be an absolute path."
-  exit 1
-fi
 
 echo "Snapshotting from directory: $SOURCE_DIR"
 
@@ -234,6 +229,9 @@ else
   SNAPSHOT_NAME="$1"
 fi
 
+# write your tar into the current directory instead of /tmp
+CC_SNAPSHOT_TAR_PATH="${PWD}/${SNAPSHOT_NAME}.tar"
+
 echo "Will snapshot the instance using the following name: '$SNAPSHOT_NAME'"
 if [ -n "${EXCLUDE_FOLDERS+x}" ]; then
   for folder in "${EXCLUDE_FOLDERS[@]}"; do
@@ -264,13 +262,14 @@ cat >$EXCLUDE_FROM <<EOF
 $(printf "%s\n" "${EXCLUDE_FOLDERS[@]:-}")
 EOF
 
+
 # Tar the specified source directory
-if [[ "$DRY_RUN" == true ]]; then
-  echo "[DRY_RUN] Would run: tar -czf /tmp/$SNAPSHOT_NAME.tar.gz -X $EXCLUDE_FROM -C $SOURCE_DIR ."
-else
-  tar -czf "/tmp/$SNAPSHOT_NAME.tar.gz" -X "$EXCLUDE_FROM" -C "$SOURCE_DIR" .
-  echo "Snapshot created at /tmp/$SNAPSHOT_NAME.tar.gz"
-fi
+#if [[ "$DRY_RUN" == true ]]; then
+#  echo "[DRY_RUN] Would run: tar -czf /tmp/$SNAPSHOT_NAME.tar.gz -X $EXCLUDE_FROM -C $SOURCE_DIR ."
+#else
+#  tar -czf "/tmp/$SNAPSHOT_NAME.tar.gz" -X "$EXCLUDE_FROM" -C "$SOURCE_DIR" .
+#  echo "Snapshot created at /tmp/$SNAPSHOT_NAME.tar.gz"
+#fi
 
 DISTRO=$(gawk -F= '/^NAME/{print $2}' /etc/os-release | tr -d \"\' | tr ' ' '-')
 UBUNTU='Ubuntu'
@@ -407,7 +406,8 @@ create_disk_image(){
 ####################################################
   # dry-run stub for filesystem sizing
   if [[ "$DRY_RUN" == true ]]; then
-    echo "[DRY_RUN] Would measure filesystem size with: du -d 0 -m --exclude-from=$EXCLUDE_FROM /"
+    #echo "[DRY_RUN] Would measure filesystem size with: du -d 0 -m --exclude-from=$EXCLUDE_FROM /"
+    echo "[DRY_RUN] Would measure filesystem size with: du -d 0 -m --exclude-from=\"$EXCLUDE_FROM\" \"$SOURCE_DIR\""
     filesystem_size=0
     total_disk_size=1500
   else
@@ -484,34 +484,17 @@ create_disk_image(){
 #  total_disk_size=$(($filesystem_size + 1500))
 
   # 550M for UEFI partition and 8M for BIOS partition
-  #run_cmd guestfish -N $CC_SNAPSHOT_CONVERTED_PATH=disk:"$total_disk_size"M -- \
-  #part-init /dev/sda gpt : \
-  #part-add /dev/sda primary 2048 1128447 : \
-  #part-add /dev/sda primary 1128448 1144831 : \
-  #part-add /dev/sda primary 1144832 -40 : \
-  #mkfs $FS /dev/sda3 label:$LABEL : \
-  #mkfs vfat /dev/sda1 label:MKFS_ESP : \
-  #mount /dev/sda3 / : tar-in $CC_SNAPSHOT_TAR_PATH / : mount /dev/sda1 /boot/efi : \
-  #sh "parted /dev/sda set 2 bios_grub on" : \
-  #sh "parted /dev/sda set 1 esp on || true" : \
-  #sh "$GRUBNAME $extra_options && $GRUB_MKCONFIG -o $GRUB_CFG $EXTRA_CMD"
-  
-  # 550M for UEFI partition and 8M for BIOS partition
-run_cmd guestfish -N "$CC_SNAPSHOT_CONVERTED_PATH=disk:${total_disk_size}M" -- \
-  part-init /dev/sda gpt \
-  : part-add /dev/sda primary 2048 1128447 \
-  : part-add /dev/sda primary 1128448 1144831 \
-  : part-add /dev/sda primary 1144832 -40 \
-  : mkfs "$FS" /dev/sda3 label:"$LABEL" \
-  : mkfs vfat /dev/sda1 label:MKFS_ESP \
-  : mount /dev/sda3 / \
-  : sh "mkdir -p /boot/efi" \
-  : tar-in "$CC_SNAPSHOT_TAR_PATH" / \
-  : mount /dev/sda1 /boot/efi \
-  : sh "parted /dev/sda set 2 bios_grub on" \
-  : sh "parted /dev/sda set 1 esp on || true" \
-  : sh "$GRUBNAME $extra_options && $GRUB_MKCONFIG -o $GRUB_CFG $EXTRA_CMD"
-
+  guestfish -N $CC_SNAPSHOT_CONVERTED_PATH=disk:"$total_disk_size"M -- \
+  part-init /dev/sda gpt : \
+  part-add /dev/sda primary 2048 1128447 : \
+  part-add /dev/sda primary 1128448 1144831 : \
+  part-add /dev/sda primary 1144832 -40 : \
+  mkfs $FS /dev/sda3 label:$LABEL : \
+  mkfs vfat /dev/sda1 label:MKFS_ESP : \
+  mount /dev/sda3 / : tar-in $CC_SNAPSHOT_TAR_PATH / : mount /dev/sda1 /boot/efi : \
+  sh "parted /dev/sda set 2 bios_grub on" : \
+  sh "parted /dev/sda set 1 esp on || true" : \
+  sh "$GRUBNAME $extra_options && $GRUB_MKCONFIG -o $GRUB_CFG $EXTRA_CMD"
 
   # To remove unwanted configuration information from your image, run:
   run_cmd virt-sysprep -a $CC_SNAPSHOT_CONVERTED_PATH
