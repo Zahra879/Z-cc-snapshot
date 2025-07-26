@@ -482,7 +482,7 @@ upload_to_glance(){
 install_prerequisites
 prepare_tarball
 check_size
-create_disk_image
-upload_to_glance
+time create_disk_image
+time upload_to_glance
 
 exit 0
